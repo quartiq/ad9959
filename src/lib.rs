@@ -287,7 +287,7 @@ where
         self.interface.read(Register::CSR as u8, &mut csr)?;
 
         let mut new_csr = csr;
-        new_csr[0].set_bits(4..=8, 0);
+        new_csr[0].set_bits(4..8, 0);
         new_csr[0].set_bit(4 + channel as usize, true);
 
         self.interface.write(Register::CSR as u8, &new_csr)?;
