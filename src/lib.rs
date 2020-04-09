@@ -88,6 +88,7 @@ pub enum Error<InterfaceE> {
     Interface(InterfaceE),
     Bounds,
     Pin,
+    Frequency,
 }
 
 impl <InterfaceE> From<InterfaceE> for Error<InterfaceE> {
@@ -178,28 +179,83 @@ where
         Ok(())
     }
 
-    /// Configure the internal PLL of the chip.
+    /// Configure the internal system clock of the chip.
     ///
     /// Arguments:
-    /// * `multiplier` - A clock multiplication factor. May be within [4, 20] or equal to 1 if the
-    /// PLL multiplier is not necessary.
-    pub fn set_clock_multiplier(&mut self, multiplier: u8) -> Result<(), Error<InterfaceE>> {
-        // TODO: Update / disable any enabled channels?
-        match multiplier {
-            1 | 4..=20 => {
-
-                let mut fr1: [u8; 3] = [0, 0, 0];
-                self.interface.read(Register::FR1 as u8, &mut fr1)?;
-                fr1[0].set_bits(2..=6, multiplier);
-                self.interface.write(Register::FR1 as u8, &fr1)?;
-                self.system_clock_multiplier = multiplier;
-                Ok(())
-            },
-
-            _ => {
-                Err(Error::Bounds)
-            }
+    /// * frequency` - The desired frequency of the system clock.
+    ///
+    /// Returns:
+    /// The actual frequency configured for the internal system clock.
+    pub fn configure_system_clock(&mut self, frequency: f32) -> Result<f32, Error<InterfaceE>> {
+        if frequency > 500_000_000.0 {
+            return Err(Error::Frequency);
         }
+
+        let prescaler: u8 = match (frequency / self.reference_clock_frequency as f32) as u32 {
+            0 => return Err(Error::Frequency),
+
+            // We cannot achieve this frequency with the PLL. Assume the PLL is not used.
+            1 | 2 | 3 => 1,
+            _ => {
+                // Configure the PLL prescaler.
+                let mut prescaler = (frequency / self.reference_clock_frequency as f32) as u8;
+                if prescaler > 20 {
+                    prescaler = 20;
+                }
+
+                prescaler
+            },
+        };
+
+        // TODO: Update / disable any enabled channels?
+        let mut fr1: [u8; 3] = [0, 0, 0];
+        self.interface.read(Register::FR1 as u8, &mut fr1)?;
+        fr1[0].set_bits(2..=6, prescaler);
+        self.interface.write(Register::FR1 as u8, &fr1)?;
+        self.system_clock_multiplier = prescaler;
+
+        Ok(self.system_clock_frequency())
+    }
+
+    /// Perform a self-test of the communication interface.
+    ///
+    /// Note:
+    /// This modifies the existing channel enables. They are restored upon exit.
+    ///
+    /// Returns:
+    /// True if the self test succeeded. False otherwise.
+    pub fn self_test(&mut self) -> Result<bool, Error<InterfaceE>> {
+        let mut csr: [u8; 1] = [0];
+        self.interface.read(Register::CSR as u8, &mut csr)?;
+        let old_csr = csr[0];
+
+        // Enable all channels.
+        csr[0].set_bits(4..8, 0xF);
+        self.interface.write(Register::CSR as u8, &csr)?;
+
+        // Read back the enable.
+        csr[0] = 0;
+        self.interface.read(Register::CSR as u8, &mut csr)?;
+        if csr[0].get_bits(4..8) != 0xF {
+            return Ok(false);
+        }
+
+        // Clear all channel enables.
+        csr[0].set_bits(4..8, 0x0);
+        self.interface.write(Register::CSR as u8, &csr)?;
+
+        // Read back the enable.
+        csr[0] = 0xFF;
+        self.interface.read(Register::CSR as u8, &mut csr)?;
+        if csr[0].get_bits(4..8) != 0 {
+            return Ok(false);
+        }
+
+        // Restore the CSR.
+        csr[0] = old_csr;
+        self.interface.write(Register::CSR as u8, &csr)?;
+
+        Ok(true)
     }
 
     fn system_clock_frequency(&self) -> f32 {
