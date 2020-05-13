@@ -34,13 +34,8 @@ pub trait Interface {
     fn read(&mut self, addr: u8, dest: &mut [u8]) -> Result<(), Self::Error>;
 }
 
-/// Communication modes of the AD9959 serial interface. Values of each enumeration correspond with
-/// the respective configuration bits within the CSR.
 #[derive(Copy, Clone)]
 pub enum Mode {
-    SingleBitTwoWire = 0b00,
-    SingleBitThreeWire = 0b01,
-    TwoBitSerial = 0b10,
     FourBitSerial = 0b11,
 }
 
@@ -89,6 +84,7 @@ pub enum Error<InterfaceE> {
     Bounds,
     Pin,
     Frequency,
+    Identification,
 }
 
 impl <InterfaceE> From<InterfaceE> for Error<InterfaceE> {
@@ -108,7 +104,6 @@ where
                     reset_pin: &mut RST,
                     io_update: UPDATE,
                     delay: DELAY,
-                    desired_mode: Mode,
                     clock_frequency: u32) -> Result<Self, Error<InterfaceE>>
     where
         RST: OutputPin,
@@ -131,25 +126,39 @@ where
 
         reset_pin.set_low().or_else(|_| Err(Error::Pin))?;
 
-        // Configure the interface to the power-on default mode so that we can communicate with the
-        // AD9959 after reset.
-       ad9959.interface.configure_mode(Mode::SingleBitTwoWire)?;
+        // multiple gotchas:
+        // 1. only four bit is compatible for reads
+        //    a) qspi listens (single-bit) on io1 vs dds sends on io0 (two-wire) or io2 (three-wire)
+        //    b) two-bit is incompatible because io3=hold=sync_i/o is driven high (might be possible
+        //       with io3 not af10 but low gpio)
+        // 2. even entering 4 bit mode from 1 bit (reset) requires forcing sync_i/o=io3 low
+        //
+        // the only simple solution is to use 4-bit mode exlusively and the only way to enter it is
+        // to construct the proper padded 4-bit sequence while the dds is still in 1 bit mode
+        //
+        // data to be sent is is 0x00 0xf6 (write CSR, default all DDS on, MSB first, but four wire)
+        // with 4-bit it's then 0x00 0x00 0x00 0x00 0x11 0x11 0x01 0x10
+        // and the first byte is taken up as the instruction
+        
+        // Configure the interface to the desired mode.
+       ad9959.interface.configure_mode(Mode::FourBitSerial)?;
 
        // Program the interface configuration in the AD9959.
-       let mut csr: [u8; 1] = [0];
-       ad9959.interface.read(Register::CSR as u8, &mut csr)?;
-       csr[0].set_bits(1..3, desired_mode as u8);
-       ad9959.interface.write(Register::CSR as u8, &csr)?;
+       let mut csr: [u8; 7] = [0x00, 0x00, 0x00, 0x11, 0x11, 0x01, 0x10];
+       // csr[0].set_bits(1..3, desired_mode as u8);
+       ad9959.interface.write(0, &csr)?;
 
        // Latch the configuration registers to make them active.
        ad9959.latch_configuration()?;
 
-        // Configure the interface to the desired mode.
-       ad9959.interface.configure_mode(desired_mode)?;
+       let mut csr: [u8; 1] = [0];
+        ad9959.interface.read(Register::CSR as u8, &mut csr)?;
+        if csr[0] != 0xf6 {
+            return Err(Error::Identification)
+        }
 
        // Set the clock frequency to configure the device as necessary.
        ad9959.set_clock_frequency(clock_frequency)?;
-
         Ok(ad9959)
     }
 
