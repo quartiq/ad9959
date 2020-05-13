@@ -220,6 +220,8 @@ where
         let mut fr1: [u8; 3] = [0, 0, 0];
         self.interface.read(Register::FR1 as u8, &mut fr1)?;
         fr1[0].set_bits(2..=6, prescaler);
+        let vco_range = frequency > 255e6;
+        fr1[0].set_bit(7, vco_range);
         self.interface.write(Register::FR1 as u8, &fr1)?;
         self.system_clock_multiplier = prescaler;
 
