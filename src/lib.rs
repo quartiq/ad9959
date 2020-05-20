@@ -144,8 +144,7 @@ where
        ad9959.interface.configure_mode(Mode::FourBitSerial)?;
 
        // Program the interface configuration in the AD9959.
-       let mut csr: [u8; 7] = [0x00, 0x00, 0x00, 0x11, 0x11, 0x01, 0x10];
-       // csr[0].set_bits(1..3, desired_mode as u8);
+       let csr: [u8; 7] = [0x00, 0x00, 0x00, 0x11, 0x11, 0x01, 0x10];
        ad9959.interface.write(0, &csr)?;
 
        // Latch the configuration registers to make them active.
@@ -347,8 +346,8 @@ where
         let amplitude_control: u16 = (amplitude / 1.0 * 2_u16.pow(10) as f32) as u16;
         let mut acr: [u8; 3] = [0, amplitude_control.to_be_bytes()[0], amplitude_control.to_be_bytes()[1]];
 
-        // Enable the amplitude multiplier for the channel.
-        acr[1].set_bit(4, true);
+        // Enable the amplitude multiplier for the channel if required.
+        acr[1].set_bit(4, amplitude_control < 0x3ff);
 
         self.modify_channel(channel, Register::ACR, &acr)?;
 
