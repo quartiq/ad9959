@@ -36,6 +36,9 @@ pub trait Interface {
 
 #[derive(Copy, Clone)]
 pub enum Mode {
+    SingleBitTwoWire = 0b00,
+    SingleBitThreeWire = 0b01,
+    TwoBitSerial = 0b10,
     FourBitSerial = 0b11,
 }
 
@@ -84,7 +87,6 @@ pub enum Error<InterfaceE> {
     Bounds,
     Pin,
     Frequency,
-    Identification,
 }
 
 impl <InterfaceE> From<InterfaceE> for Error<InterfaceE> {
@@ -104,6 +106,7 @@ where
                     reset_pin: &mut RST,
                     io_update: UPDATE,
                     delay: DELAY,
+                    desired_mode: Mode,
                     clock_frequency: u32) -> Result<Self, Error<InterfaceE>>
     where
         RST: OutputPin,
@@ -126,39 +129,23 @@ where
 
         reset_pin.set_low().or_else(|_| Err(Error::Pin))?;
 
-        // multiple gotchas:
-        // 1. only four bit is compatible for reads
-        //    a) qspi listens (single-bit) on io1 vs dds sends on io0 (two-wire) or io2 (three-wire)
-        //    b) two-bit is incompatible because io3=hold=sync_i/o is driven high (might be possible
-        //       with io3 not af10 but low gpio)
-        // 2. even entering 4 bit mode from 1 bit (reset) requires forcing sync_i/o=io3 low
-        //
-        // the only simple solution is to use 4-bit mode exlusively and the only way to enter it is
-        // to construct the proper padded 4-bit sequence while the dds is still in 1 bit mode
-        //
-        // data to be sent is is 0x00 0xf6 (write CSR, default all DDS on, MSB first, but four wire)
-        // with 4-bit it's then 0x00 0x00 0x00 0x00 0x11 0x11 0x01 0x10
-        // and the first byte is taken up as the instruction
-        
-        // Configure the interface to the desired mode.
-       ad9959.interface.configure_mode(Mode::FourBitSerial)?;
+       ad9959.interface.configure_mode(Mode::SingleBitTwoWire)?;
 
-       // Program the interface configuration in the AD9959.
-       let mut csr: [u8; 7] = [0x00, 0x00, 0x00, 0x11, 0x11, 0x01, 0x10];
-       // csr[0].set_bits(1..3, desired_mode as u8);
-       ad9959.interface.write(0, &csr)?;
+        // Program the interface configuration in the AD9959. Default to all channels enabled.
+        let mut csr: [u8; 1] = [0xF0];
+         csr[0].set_bits(1..3, desired_mode as u8);
+        ad9959.interface.write(0, &csr)?;
 
-       // Latch the configuration registers to make them active.
-       ad9959.latch_configuration()?;
+         // Configure the interface to the desired mode.
+        ad9959.interface.configure_mode(Mode::FourBitSerial)?;
 
-       let mut csr: [u8; 1] = [0];
-        ad9959.interface.read(Register::CSR as u8, &mut csr)?;
-        if csr[0] != 0xf6 {
-            return Err(Error::Identification)
-        }
+        // Latch the configuration registers to make them active.
+        ad9959.latch_configuration()?;
 
-       // Set the clock frequency to configure the device as necessary.
-       ad9959.set_clock_frequency(clock_frequency)?;
+        ad9959.interface.configure_mode(desired_mode)?;
+
+        // Set the clock frequency to configure the device as necessary.
+        ad9959.set_clock_frequency(clock_frequency)?;
         Ok(ad9959)
     }
 
@@ -195,19 +182,19 @@ where
     ///
     /// Returns:
     /// The actual frequency configured for the internal system clock.
-    pub fn configure_system_clock(&mut self, frequency: f32) -> Result<f32, Error<InterfaceE>> {
+    pub fn configure_system_clock(&mut self, frequency: f64) -> Result<f64, Error<InterfaceE>> {
         if frequency > 500_000_000.0 {
             return Err(Error::Frequency);
         }
 
-        let prescaler: u8 = match (frequency / self.reference_clock_frequency as f32) as u32 {
+        let prescaler: u8 = match (frequency / self.reference_clock_frequency as f64) as u32 {
             0 => return Err(Error::Frequency),
 
             // We cannot achieve this frequency with the PLL. Assume the PLL is not used.
             1 | 2 | 3 => 1,
             _ => {
                 // Configure the PLL prescaler.
-                let mut prescaler = (frequency / self.reference_clock_frequency as f32) as u8;
+                let mut prescaler = (frequency / self.reference_clock_frequency as f64) as u8;
                 if prescaler > 20 {
                     prescaler = 20;
                 }
@@ -269,8 +256,8 @@ where
         Ok(true)
     }
 
-    fn system_clock_frequency(&self) -> f32 {
-        self.system_clock_multiplier as f32 * self.reference_clock_frequency as f32
+    fn system_clock_frequency(&self) -> f64 {
+        self.system_clock_multiplier as f64 * self.reference_clock_frequency as f64
     }
 
     /// Enable an output channel.
@@ -363,14 +350,17 @@ where
     ///
     /// Returns:
     /// The actual programmed frequency of the channel.
-    pub fn set_frequency(&mut self, channel: Channel, frequency: f32) -> Result<f32, Error<InterfaceE>> {
+    pub fn set_frequency(&mut self, channel: Channel, frequency: f64) -> Result<f64, Error<InterfaceE>> {
         if frequency < 0.0 || frequency > self.system_clock_frequency() {
             return Err(Error::Bounds);
         }
 
-        let tuning_word: u32 = ((frequency as f32 / self.system_clock_frequency()) * u32::max_value()
-            as f32) as u32;
+        // The function for channel frequency is `f_out = FTW * f_s / 2^32`, where FTW is the
+        // frequency tuning word and f_s is the system clock rate.
+        let tuning_word: u32 = ((frequency as f64 / self.system_clock_frequency())
+                                * 1u64.wrapping_shl(32) as f64) as u32;
+
         self.modify_channel(channel, Register::CFTW0, &tuning_word.to_be_bytes())?;
-        Ok((tuning_word as f32 / u32::max_value() as f32) * self.system_clock_frequency())
+        Ok((tuning_word as f64 / 1u64.wrapping_shl(32) as f64) * self.system_clock_frequency())
     }
 }
