@@ -316,18 +316,14 @@ where
     ///
     /// Arguments:
     /// * `channel` - The channel to configure the frequency of.
-    /// * `phase_degrees` - The desired phase offset within [0, 360] degrees.
+    /// * `phase_turns` - The desired phase offset in turns.
     ///
     /// Returns:
     /// The actual programmed phase offset of the channel in degrees.
-    pub fn set_phase(&mut self, channel: Channel, phase_degrees: f32) -> Result<f32, Error<InterfaceE>> {
-        if phase_degrees > 360.0 || phase_degrees < 0.0 {
-            return Err(Error::Bounds);
-        }
-
-        let phase_offset: u16 = (phase_degrees / 360.0 * 2_u32.pow(14) as f32) as u16;
+    pub fn set_phase(&mut self, channel: Channel, phase_turns: f32) -> Result<f32, Error<InterfaceE>> {
+        let phase_offset: u16 = (phase_turns * (1 << 14) as f32) as u16;
         self.modify_channel(channel, Register::CPOW0, &phase_offset.to_be_bytes())?;
-        Ok((phase_offset as f32 / 2_u32.pow(14) as f32) * 360.0)
+        Ok(phase_offset as f32 / (1 << 14) as f32)
     }
 
     /// Configure the amplitude of a specified channel.
@@ -343,7 +339,7 @@ where
             return Err(Error::Bounds);
         }
 
-        let amplitude_control: u16 = (amplitude / 1.0 * 2_u16.pow(10) as f32) as u16;
+        let amplitude_control: u16 = (amplitude * (1 << 10) as f32) as u16;
         let mut acr: [u8; 3] = [0, amplitude_control.to_be_bytes()[0], amplitude_control.to_be_bytes()[1]];
 
         // Enable the amplitude multiplier for the channel if required.
@@ -351,7 +347,7 @@ where
 
         self.modify_channel(channel, Register::ACR, &acr)?;
 
-        Ok(amplitude_control as f32 / 2_u16.pow(10) as f32)
+        Ok(amplitude_control as f32 / (1 << 10) as f32)
     }
 
     /// Configure the frequency of a specified channel.
@@ -362,14 +358,9 @@ where
     ///
     /// Returns:
     /// The actual programmed frequency of the channel.
-    pub fn set_frequency(&mut self, channel: Channel, frequency: f32) -> Result<f32, Error<InterfaceE>> {
-        if frequency < 0.0 || frequency > self.system_clock_frequency() {
-            return Err(Error::Bounds);
-        }
-
-        let tuning_word: u32 = ((frequency as f32 / self.system_clock_frequency()) * u32::max_value()
-            as f32) as u32;
+    pub fn set_frequency(&mut self, channel: Channel, frequency: f64) -> Result<f64, Error<InterfaceE>> {
+        let tuning_word: u32 = (frequency / self.system_clock_frequency() as f64 * 2u64.pow(32) as f64) as u32;
         self.modify_channel(channel, Register::CFTW0, &tuning_word.to_be_bytes())?;
-        Ok((tuning_word as f32 / u32::max_value() as f32) * self.system_clock_frequency())
+        Ok(tuning_word as f64 * self.system_clock_frequency() as f64 / 2u64.pow(32) as f64)
     }
 }
