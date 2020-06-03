@@ -107,7 +107,8 @@ where
                     io_update: UPDATE,
                     delay: DELAY,
                     desired_mode: Mode,
-                    clock_frequency: u32) -> Result<Self, Error<InterfaceE>>
+                    clock_frequency: u32,
+                    multiplier: u8) -> Result<Self, Error<InterfaceE>>
     where
         RST: OutputPin,
     {
@@ -145,7 +146,7 @@ where
         ad9959.interface.configure_mode(desired_mode)?;
 
         // Set the clock frequency to configure the device as necessary.
-        ad9959.set_clock_frequency(clock_frequency)?;
+        ad9959.configure_system_clock(clock_frequency, multiplier)?;
         Ok(ad9959)
     }
 
@@ -159,56 +160,37 @@ where
        Ok(())
     }
 
-    /// Specify the reference clock frequency for the chip.
-    ///
-    /// Arguments:
-    /// * `clock_frequency` - The refrence clock frequency provided to the AD9959 core.
-    pub fn set_clock_frequency(&mut self, clock_frequency: u32) -> Result<(), Error<InterfaceE>> {
-        // TODO: Check validity of the clock frequency.
-
-        // TODO: If the input clock is above 255 MHz, enable the VCO gain control bit.
-
-        self.reference_clock_frequency = clock_frequency;
-
-        // TODO: Update the system clock frequency given the current PLL configurtation.
-
-        Ok(())
-    }
-
     /// Configure the internal system clock of the chip.
     ///
     /// Arguments:
-    /// * frequency` - The desired frequency of the system clock.
+    /// * `reference_clock_frequency` - The reference clock frequency provided to the AD9959 core.
+    /// * `prescaler` - The frequency prescaler of the system clock. Must be 1 or 4-20.
     ///
     /// Returns:
     /// The actual frequency configured for the internal system clock.
-    pub fn configure_system_clock(&mut self, frequency: f64) -> Result<f64, Error<InterfaceE>> {
-        if frequency > 500_000_000.0 {
-            return Err(Error::Frequency);
+    pub fn configure_system_clock(&mut self,
+                                  reference_clock_frequency: u32,
+                                  prescaler: u8) -> Result<f64, Error<InterfaceE>>
+    {
+        self.reference_clock_frequency = reference_clock_frequency;
+
+        if prescaler != 1 && (prescaler > 20 || prescaler < 4) {
+            return Err(Error::Bounds);
         }
 
-        let prescaler: u8 = match (frequency / self.reference_clock_frequency as f64) as u32 {
-            0 => return Err(Error::Frequency),
-
-            // We cannot achieve this frequency with the PLL. Assume the PLL is not used.
-            1 | 2 | 3 => 1,
-            _ => {
-                // Configure the PLL prescaler.
-                let mut prescaler = (frequency / self.reference_clock_frequency as f64) as u8;
-                if prescaler > 20 {
-                    prescaler = 20;
-                }
-
-                prescaler
-            },
-        };
+        let frequency = prescaler as f64 * self.reference_clock_frequency as f64;
+        if frequency > 500_000_000.0f64 {
+            return Err(Error::Frequency);
+        }
 
         // TODO: Update / disable any enabled channels?
         let mut fr1: [u8; 3] = [0, 0, 0];
         self.interface.read(Register::FR1 as u8, &mut fr1)?;
         fr1[0].set_bits(2..=6, prescaler);
+
         let vco_range = frequency > 255e6;
         fr1[0].set_bit(7, vco_range);
+
         self.interface.write(Register::FR1 as u8, &fr1)?;
         self.system_clock_multiplier = prescaler;
 
@@ -299,23 +281,23 @@ where
 
         Ok(())
     }
-    
+
     /// Configure the phase of a specified channel.
     ///
     /// Arguments:
     /// * `channel` - The channel to configure the frequency of.
-    /// * `phase_degrees` - The desired phase offset within [0, 360] degrees.
+    /// * `phase_turns` - The desired phase offset in normalized turns.
     ///
     /// Returns:
     /// The actual programmed phase offset of the channel in degrees.
-    pub fn set_phase(&mut self, channel: Channel, phase_degrees: f32) -> Result<f32, Error<InterfaceE>> {
-        if phase_degrees > 360.0 || phase_degrees < 0.0 {
+    pub fn set_phase(&mut self, channel: Channel, phase_turns: f32) -> Result<f32, Error<InterfaceE>> {
+        if phase_turns > 1.0 || phase_turns < 0.0 {
             return Err(Error::Bounds);
         }
 
-        let phase_offset: u16 = (phase_degrees / 360.0 * 2_u32.pow(14) as f32) as u16;
+        let phase_offset: u16 = (phase_turns * 1u32.wrapping_shl(14) as f32) as u16;
         self.modify_channel(channel, Register::CPOW0, &phase_offset.to_be_bytes())?;
-        Ok((phase_offset as f32 / 2_u32.pow(14) as f32) * 360.0)
+        Ok((phase_offset as f32 / 1u32.wrapping_shl(14) as f32) * 360.0)
     }
 
     /// Configure the amplitude of a specified channel.
@@ -331,15 +313,17 @@ where
             return Err(Error::Bounds);
         }
 
-        let amplitude_control: u16 = (amplitude / 1.0 * 2_u16.pow(10) as f32) as u16;
+        let amplitude_control: u16 = (amplitude / 1u16.wrapping_shl(10) as f32) as u16;
         let mut acr: [u8; 3] = [0, amplitude_control.to_be_bytes()[0], amplitude_control.to_be_bytes()[1]];
 
-        // Enable the amplitude multiplier for the channel.
-        acr[1].set_bit(4, true);
+        // Enable the amplitude multiplier for the channel if required. The amplitude control has
+        // full-scale at 0x3FF (amplitude of 1), so the multiplier should be disabled whenever
+        // full-scale is used.
+        acr[1].set_bit(4, amplitude_control >= 1u16.wrapping_shl(10));
 
         self.modify_channel(channel, Register::ACR, &acr)?;
 
-        Ok(amplitude_control as f32 / 2_u16.pow(10) as f32)
+        Ok(amplitude_control as f32 / 1_u16.wrapping_shl(10) as f32)
     }
 
     /// Configure the frequency of a specified channel.
