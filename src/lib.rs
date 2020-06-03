@@ -34,7 +34,7 @@ pub trait Interface {
     fn read(&mut self, addr: u8, dest: &mut [u8]) -> Result<(), Self::Error>;
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum Mode {
     SingleBitTwoWire = 0b00,
     SingleBitThreeWire = 0b01,
